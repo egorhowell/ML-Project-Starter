@@ -1,0 +1,73 @@
+[tool.poetry]
+name = "ml-project-starter"
+version = "0.1.0"
+description = "Production-grade ML project starter template. Pick your project with the workbook, build it on this scaffold."
+authors = ["Your Name <you@example.com>"]
+readme = "README.md"
+packages = [{include = "src"}]
+
+[tool.poetry.dependencies]
+python = "^3.12"
+# Core data handling.
+numpy = "^1.26.0"
+pandas = "^2.1.0"
+# HTTP client used by the default open-meteo extractor. Replace or supplement as needed.
+requests = "^2.31.0"
+# Storage. The default pipeline writes predictions to Supabase.
+supabase = "^2.23.0"
+python-dotenv = "^1.0.0"
+# Dashboard.
+streamlit = "^1.28.0"
+plotly = "^5.18.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.4.0"
+pytest-cov = "^4.1.0"
+pytest-mock = "^3.11.0"
+black = "^23.7.0"
+ruff = "^0.1.0"
+mypy = "^1.5.0"
+pre-commit = "^3.4.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+line-length = 100
+target-version = ['py312']
+include = '\.pyi?$'
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort (import ordering)
+    "N",  # pep8-naming
+    "UP", # pyupgrade
+    "B",  # flake8-bugbear (common bug patterns)
+]
+ignore = [
+    "E501",  # line too long (black handles this)
+]
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "--cov=src",
+    "--cov-report=term-missing",
+    "--strict-markers",
+]
