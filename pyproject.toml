@@ -2,7 +2,7 @@
 name = "ml-project-starter"
 version = "0.1.0"
 description = "Production-grade ML project starter template. Pick your project with the workbook, build it on this scaffold."
-authors = ["Your Name <you@example.com>"]
+authors = ["Egor Howell <egor@egorhowell.com>"]
 readme = "README.md"
 packages = [{include = "src"}]
 
