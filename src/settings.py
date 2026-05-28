@@ -1,51 +1,38 @@
-"""Configuration for the pipeline.
+"""Configuration — the project's control panel.
 
-Anything that you might want to tweak without changing pipeline logic lives here.
-Treat this file as your control panel.
+Anything you'd tweak without touching pipeline logic lives here.
 """
 
 from __future__ import annotations
 
-# -----------------------------------------------------------------------------
-# WHAT YOU ARE PREDICTING
-# -----------------------------------------------------------------------------
-# Each entry is one thing the pipeline will train a model for and produce a
-# prediction about. For the default weather demo, each entry is a city.
-#
-# REPLACE THIS with whatever your project predicts:
-#   - Stocks: [("AAPL", {}), ("GOOGL", {}), ...]
-#   - Football teams: [("Arsenal", {"league": "EPL"}), ...]
-#   - Cryptocurrencies: [("BTC", {}), ("ETH", {}), ...]
-#
-# The dict in each entry is free-form metadata passed through to the extractor.
-ITEMS_TO_PREDICT: list[tuple[str, dict]] = [
-    ("London", {"latitude": 51.5074, "longitude": -0.1278}),
-    ("New York", {"latitude": 40.7128, "longitude": -74.0060}),
-    ("Tokyo", {"latitude": 35.6762, "longitude": 139.6503}),
-]
+# ── Data ──────────────────────────────────────────────────────────────────────
+# Path to the labeled CSV used for training.
+DATA_PATH: str = "data/train.csv"
+# Path to the unlabeled CSV used for inference (no target column required).
+INFERENCE_DATA_PATH: str = "data/inference.csv"
 
-# How much historical data the model trains on. More history = more signal but
-# slower and potentially less relevant. 90 days is a sensible default for daily data.
-LOOKBACK_DAYS: int = 90
+# ── Features & target ─────────────────────────────────────────────────────────
+# Name of the column the model should learn to predict.
+TARGET_COLUMN: str = "target"
+# Columns to use as model inputs. Leave empty to use every column except TARGET_COLUMN.
+FEATURE_COLUMNS: list[str] = []
 
-# -----------------------------------------------------------------------------
-# STORAGE
-# -----------------------------------------------------------------------------
-# Name of the Supabase table where predictions are written. You'll create this
-# table in the Supabase UI — see README "Supabase setup" for the schema.
+# ── Train / validation split ──────────────────────────────────────────────────
+TEST_SIZE: float = 0.2
+RANDOM_STATE: int = 42
+
+# ── MLflow experiment tracking ────────────────────────────────────────────────
+# Set MLFLOW_TRACKING_URI to a remote URI (e.g. "http://mlflow:5000") for a
+# shared server. The default writes runs locally to mlruns/.
+MLFLOW_EXPERIMENT_NAME: str = "ml-project-starter"
+MLFLOW_TRACKING_URI: str = "mlruns"
+
+# ── Storage ───────────────────────────────────────────────────────────────────
 SUPABASE_TABLE_NAME: str = "predictions"
-
-# If Supabase isn't configured (env vars missing), the pipeline falls back to
-# writing predictions to this local JSON file. Useful for first-run / local dev.
-# This file is gitignored.
 LOCAL_FALLBACK_PATH: str = "data/predictions.json"
 
-# -----------------------------------------------------------------------------
-# DASHBOARD
-# -----------------------------------------------------------------------------
-# Title shown at the top of the Streamlit dashboard. Make it yours.
-DASHBOARD_TITLE: str = "ML Project Starter — Daily Weather Predictions"
+# ── Dashboard ─────────────────────────────────────────────────────────────────
+DASHBOARD_TITLE: str = "ML Project Starter"
 DASHBOARD_SUBTITLE: str = (
-    "Placeholder demo: predicting tomorrow's mean temperature for a few cities. "
-    "Replace the model, data, and copy with your own project."
+    "Replace this with a one-liner describing what your model predicts."
 )

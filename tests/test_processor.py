@@ -1,84 +1,95 @@
-"""Tests for src.processor.
-
-This file demonstrates two common pytest patterns:
-  1. Plain test functions — see `test_preprocess_drops_null_rows` and
-     `test_preprocess_sorts_by_date` below.
-  2. Parametrized tests — see `test_preprocess_handles_various_null_patterns`,
-     which runs the same test body against several different inputs without
-     duplicating the setup code.
-
-When you find yourself copy-pasting a test and only changing the input values,
-that's the signal to switch to parametrize.
-"""
+"""Tests for src.processor."""
 
 from __future__ import annotations
 
 import pandas as pd
 import pytest
 
-from src import processor
+from src import processor, settings
+from src.processor import _add_date_features, _add_interaction_terms
 
 
-def test_preprocess_drops_null_rows() -> None:
-    raw = {
-        "thing": pd.DataFrame(
-            {
-                "date": pd.to_datetime(["2026-01-01", "2026-01-02", "2026-01-03"]),
-                "value": [1.0, None, 3.0],
-            }
-        )
-    }
+# ------------------------------------------------------------------
+# preprocess() — (X, y) split
+# ------------------------------------------------------------------
 
-    cleaned = processor.preprocess(raw)
+def test_preprocess_splits_X_and_y(regression_df, monkeypatch) -> None:
+    monkeypatch.setattr(settings, "TARGET_COLUMN", "target")
+    monkeypatch.setattr(settings, "FEATURE_COLUMNS", [])
 
-    assert len(cleaned["thing"]) == 2
-    assert cleaned["thing"]["value"].isna().sum() == 0
+    X, y = processor.preprocess(regression_df)
 
-
-def test_preprocess_sorts_by_date() -> None:
-    raw = {
-        "thing": pd.DataFrame(
-            {
-                "date": pd.to_datetime(["2026-01-03", "2026-01-01", "2026-01-02"]),
-                "value": [3.0, 1.0, 2.0],
-            }
-        )
-    }
-
-    cleaned = processor.preprocess(raw)
-
-    assert list(cleaned["thing"]["value"]) == [1.0, 2.0, 3.0]
+    assert "target" not in X.columns
+    assert y.name == "target"
+    assert len(X) == len(y)
 
 
-# Each tuple in the list below becomes one separate test case. pytest names each
-# one using the `id=` slug at the end, so failures point you at the exact scenario.
-@pytest.mark.parametrize(
-    "input_values, expected_count",
-    [
-        pytest.param([1.0, 2.0, 3.0], 3, id="no-nulls"),
-        pytest.param([1.0, None, 3.0], 2, id="single-null-in-middle"),
-        pytest.param([None, None, None], 0, id="all-nulls"),
-        pytest.param([1.0], 1, id="single-value"),
-    ],
-)
-def test_preprocess_handles_various_null_patterns(
-    input_values: list[float | None], expected_count: int
-) -> None:
-    """Same logic as test_preprocess_drops_null_rows, but across four scenarios.
+def test_preprocess_respects_feature_columns(regression_df, monkeypatch) -> None:
+    monkeypatch.setattr(settings, "TARGET_COLUMN", "target")
+    monkeypatch.setattr(settings, "FEATURE_COLUMNS", ["feature_a"])
 
-    This is the value of parametrize: the test body is written once and pytest
-    runs it once per parameter set, reporting them as four separate results.
-    """
-    n_rows = len(input_values)
-    raw = {
-        "thing": pd.DataFrame(
-            {
-                "date": pd.date_range("2026-01-01", periods=n_rows, freq="D"),
-                "value": input_values,
-            }
-        )
-    }
+    X, _ = processor.preprocess(regression_df)
 
-    cleaned = processor.preprocess(raw)
+    assert list(X.columns) == ["feature_a"]
 
-    assert len(cleaned["thing"]) == expected_count
+
+def test_preprocess_drops_null_target_rows(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "TARGET_COLUMN", "target")
+    monkeypatch.setattr(settings, "FEATURE_COLUMNS", [])
+
+    df = pd.DataFrame({"feature_a": [1.0, 2.0, 3.0], "target": [10.0, None, 30.0]})
+    X, y = processor.preprocess(df)
+
+    assert len(X) == 2
+    assert y.isna().sum() == 0
+
+
+def test_preprocess_resets_index(regression_df, monkeypatch) -> None:
+    monkeypatch.setattr(settings, "TARGET_COLUMN", "target")
+    monkeypatch.setattr(settings, "FEATURE_COLUMNS", [])
+
+    X, y = processor.preprocess(regression_df.iloc[10:].copy())
+
+    assert list(X.index) == list(range(len(X)))
+
+
+# ------------------------------------------------------------------
+# preprocess_features() — inference (no target)
+# ------------------------------------------------------------------
+
+def test_preprocess_features_excludes_target(regression_df, monkeypatch) -> None:
+    monkeypatch.setattr(settings, "TARGET_COLUMN", "target")
+    monkeypatch.setattr(settings, "FEATURE_COLUMNS", [])
+
+    df = regression_df.drop(columns=["target"])
+    X = processor.preprocess_features(df)
+
+    assert "target" not in X.columns
+
+
+def test_preprocess_features_raises_on_missing_feature_column(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "TARGET_COLUMN", "target")
+    monkeypatch.setattr(settings, "FEATURE_COLUMNS", ["nonexistent"])
+
+    df = pd.DataFrame({"feature_a": [1.0], "feature_b": [2.0]})
+    with pytest.raises(ValueError, match="FEATURE_COLUMNS"):
+        processor.preprocess_features(df)
+
+
+# ------------------------------------------------------------------
+# Feature-engineering helpers
+# ------------------------------------------------------------------
+
+def test_add_interaction_terms(regression_df) -> None:
+    result = _add_interaction_terms(regression_df.copy(), "feature_a", "feature_b")
+    assert "feature_a_x_feature_b" in result.columns
+    expected = regression_df["feature_a"] * regression_df["feature_b"]
+    pd.testing.assert_series_equal(result["feature_a_x_feature_b"], expected, check_names=False)
+
+
+def test_add_date_features() -> None:
+    df = pd.DataFrame({"date": pd.date_range("2026-01-01", periods=7, freq="D"), "value": range(7)})
+    result = _add_date_features(df.copy(), "date")
+    for col in ("day_of_week", "month", "quarter", "is_weekend"):
+        assert col in result.columns
+    assert set(result["is_weekend"].unique()).issubset({0, 1})

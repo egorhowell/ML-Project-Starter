@@ -1,53 +1,47 @@
 """Tests for src.database.
 
-These exercise only the local-JSON fallback path so the test suite has no
-external dependencies. The Supabase path is exercised in production.
-
-The `temp_fallback_path` fixture used by these tests lives in conftest.py and is
-auto-discovered by pytest — see that file for what it does.
+Exercises only the local-JSON fallback path so the test suite has no
+external dependencies. The `temp_fallback_path` fixture (conftest.py) redirects
+writes to a temp file and clears Supabase env vars.
 """
 
 from __future__ import annotations
 
 import json
-from datetime import date
 from pathlib import Path
 
 from src import database
 
 
 def test_save_then_load_round_trip(temp_fallback_path: Path) -> None:
-    rows = {
-        "thing": {
-            "item": "thing",
-            "prediction": 12.0,
-            "last_value": 11.0,
-            "predicted_change_pct": 9.09,
-        }
-    }
-    database.save_predictions(rows, as_of=date(2026, 5, 14))
+    rows = [{"item": "thing", "prediction": 12.0, "predicted_at": "2026-05-14T00:00:00+00:00"}]
 
+    database.save_predictions(rows)
     loaded = database.load_recent_predictions(limit=10)
 
     assert len(loaded) == 1
     assert loaded[0]["item"] == "thing"
-    assert loaded[0]["as_of_date"] == "2026-05-14"
+    assert loaded[0]["prediction"] == 12.0
 
 
 def test_save_appends_to_existing_file(temp_fallback_path: Path) -> None:
-    """Two saves on different days should leave two rows in the file."""
-    database.save_predictions(
-        {"thing": {"item": "thing", "prediction": 1.0, "last_value": 1.0, "predicted_change_pct": 0.0}},
-        as_of=date(2026, 5, 13),
-    )
-    database.save_predictions(
-        {"thing": {"item": "thing", "prediction": 2.0, "last_value": 1.0, "predicted_change_pct": 100.0}},
-        as_of=date(2026, 5, 14),
-    )
+    database.save_predictions([{"prediction": 1.0}])
+    database.save_predictions([{"prediction": 2.0}])
 
     raw = json.loads(temp_fallback_path.read_text())
     assert len(raw) == 2
 
-    loaded = database.load_recent_predictions(limit=10)
-    # load_recent_predictions returns newest first.
-    assert loaded[0]["as_of_date"] == "2026-05-14"
+
+def test_load_recent_respects_limit(temp_fallback_path: Path) -> None:
+    rows = [{"prediction": float(i)} for i in range(10)]
+    database.save_predictions(rows)
+
+    loaded = database.load_recent_predictions(limit=3)
+
+    assert len(loaded) == 3
+    # Should return the last 3 rows (most recently written).
+    assert [r["prediction"] for r in loaded] == [7.0, 8.0, 9.0]
+
+
+def test_load_returns_empty_list_when_no_file(temp_fallback_path: Path) -> None:
+    assert database.load_recent_predictions() == []

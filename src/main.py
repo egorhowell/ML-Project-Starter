@@ -1,15 +1,17 @@
 """Pipeline entry point.
 
-Orchestrates the full flow:
+Two modes:
 
-    extract → preprocess → fit model & predict → postprocess → save
+    python -m src.main train    → load data, train model, evaluate, save to disk
+    python -m src.main predict  → load inference data, load saved model, predict, store results
 
-This is what gets run:
-  - locally via `make run`
-  - daily in production via .github/workflows/daily-run.yml
+Run locally:    make train   /   make predict
+Run in CI/CD:   .github/workflows/daily-run.yml (predict mode on a schedule)
 
-You usually won't need to edit this file unless you're adding a new stage to the
-pipeline. To change WHAT each stage does, edit the file for that stage instead.
+You usually won't need to edit this file. To change what each stage does, edit
+the file for that stage instead (extractor.py, processor.py, model.py, …).
+To add MLflow experiment tracking, swap Model() / model.fit() for
+train_with_tracking() in the train() function below.
 """
 
 from __future__ import annotations
@@ -19,11 +21,9 @@ import sys
 
 from dotenv import load_dotenv
 
-from src import database, extractor, output, processor, settings
+from src import database, extractor, output, processor
 from src.model import Model
 
-# Load any environment variables defined in a .env file at the repo root.
-# Important for the Supabase keys when running locally.
 load_dotenv()
 
 logging.basicConfig(
@@ -34,36 +34,50 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def run() -> None:
-    """Execute one full pipeline run."""
-    logger.info("=== Pipeline run starting ===")
+def train() -> None:
+    """Load labeled data, train a model, evaluate it, and save it to disk."""
+    logger.info("=== Training run starting ===")
 
-    # 1. Extract: pull raw historical data for every item we want to predict.
-    raw_data = extractor.extract_data()
-    logger.info("Extracted data for %d items", len(raw_data))
+    raw = extractor.load_training_data()
+    logger.info("Loaded %d rows for training", len(raw))
 
-    # 2. Preprocess: clean it up.
-    cleaned_data = processor.preprocess(raw_data)
+    X, y = processor.preprocess(raw)
+    logger.info("Features: %s | Target: %s", list(X.columns), y.name)
 
-    # 3. Model: fit a separate model per item and produce one prediction each.
-    #    For a small number of items, training one model per item is the simplest
-    #    pattern. If you ever have hundreds or thousands of items, consider
-    #    training one shared model with the item identity as a feature.
-    predictions: dict[str, float] = {}
-    for name, df in cleaned_data.items():
-        model = Model()
-        model.fit(df["value"])
-        predictions[name] = model.predict_next()
-        logger.info("Predicted %s → %.4f", name, predictions[name])
+    model = Model()
+    # To log params/metrics to MLflow, replace the two lines above with:
+    #   from src.model import train_with_tracking
+    #   model, metrics = train_with_tracking(X, y)
+    metrics = model.fit(X, y)
+    logger.info("Metrics: %s", metrics)
 
-    # 4. Postprocess: turn raw predictions into rows ready for storage.
-    rows = output.postprocess(predictions, cleaned_data)
+    model.save()
+    logger.info("=== Training complete ===")
 
-    # 5. Persist.
+
+def predict() -> None:
+    """Load inference data, run the saved model, and store predictions."""
+    logger.info("=== Prediction run starting ===")
+
+    raw = extractor.load_inference_data()
+    logger.info("Loaded %d rows for inference", len(raw))
+
+    X = processor.preprocess_features(raw)
+
+    model = Model.load()
+    preds = model.predict(X)
+
+    rows = output.format_predictions(raw, preds)
     database.save_predictions(rows)
 
-    logger.info("=== Pipeline run complete ===")
+    logger.info("Stored %d predictions", len(rows))
+    logger.info("=== Prediction run complete ===")
 
+
+_MODES = {"train": train, "predict": predict}
 
 if __name__ == "__main__":
-    run()
+    mode = sys.argv[1] if len(sys.argv) > 1 else "predict"
+    if mode not in _MODES:
+        sys.exit(f"Unknown mode {mode!r}. Choose from: {list(_MODES)}")
+    _MODES[mode]()

@@ -1,52 +1,62 @@
-"""Post-processing of predictions.
+"""Output formatting.
 
-Optional step that runs after the model and before saving. Use it for things like:
-  - Aggregating per-item predictions into a portfolio-level allocation
-    (this is what the original Egor repo did: forecasts → optimal weights)
-  - Applying business rules (clip predictions to a valid range, round to nearest cent)
-  - Reconciling predictions across multiple models (ensembles)
-  - Generating recommendations from raw predictions
-
-The default implementation is a passthrough: it returns the predictions exactly
-as they came in. If your project doesn't need post-processing, leave it alone.
+Converts raw model predictions into a list of dicts ready for storage.
+Extend this file with any post-prediction logic your project needs:
+  - Thresholding probabilities → binary labels
+  - Ranking / top-k selection
+  - Inverse-transforming a log-scaled target
+  - Attaching metadata (run ID, model version, timestamp)
 """
 
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 
+import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
 
 
-def postprocess(
-    predictions: dict[str, float],
-    raw_data: dict[str, pd.DataFrame],
-) -> dict[str, dict]:
-    """Convert raw model predictions into rows ready for storage.
+def format_predictions(
+    source_df: pd.DataFrame,
+    predictions: np.ndarray,
+) -> list[dict]:
+    """Attach predictions to their source rows and return a list ready for storage.
 
     Args:
-        predictions: dict from item name -> predicted next-step value.
-        raw_data:    the cleaned historical data, in case you need it for
-                     post-processing (e.g. to compute predicted % change).
+        source_df:   the DataFrame that was passed to model.predict() — used to
+                     carry source-row context (IDs, feature values, …) into storage.
+        predictions: 1-D array from model.predict(), same length as source_df.
 
     Returns:
-        A dict from item name -> dict of fields to persist. The default fields
-        are designed to be useful on a dashboard; add or remove as you like.
+        List of dicts, one per row, with a "prediction" key added and a
+        "predicted_at" UTC timestamp.
     """
-    rows: dict[str, dict] = {}
-    for name, prediction in predictions.items():
-        history = raw_data[name]
-        last_value = float(history["value"].iloc[-1]) if len(history) else None
-        change_pct = (
-            ((prediction - last_value) / last_value * 100.0) if last_value else None
+    if len(source_df) != len(predictions):
+        raise ValueError(
+            f"Length mismatch: source_df has {len(source_df)} rows "
+            f"but predictions has {len(predictions)} values."
         )
-        rows[name] = {
-            "item": name,
-            "prediction": float(prediction),
-            "last_value": last_value,
-            "predicted_change_pct": change_pct,
-        }
 
+    now = datetime.now(tz=timezone.utc).isoformat()
+    rows = source_df.to_dict(orient="records")
+    for row, pred in zip(rows, predictions):
+        row["prediction"] = _coerce(pred)
+        row["predicted_at"] = now
     return rows
+
+
+# ------------------------------------------------------------------
+# Private helpers
+# ------------------------------------------------------------------
+
+def _coerce(value) -> float | str:
+    """Normalise a single prediction to a JSON-serialisable scalar."""
+    if isinstance(value, (np.floating, np.integer)):
+        return float(value)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return str(value)

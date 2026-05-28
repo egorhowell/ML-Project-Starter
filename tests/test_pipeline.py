@@ -1,18 +1,8 @@
-"""Integration test for the full pipeline.
+"""Integration tests for main.train() and main.predict().
 
-Unit tests check that each module behaves correctly in isolation. Integration
-tests check that the modules behave correctly *together* — wired up the way
-production wires them.
-
-The trick to a good integration test:
-  - DO mock out external services (network APIs, real databases) so the test
-    is fast and offline.
-  - DON'T mock out anything you're trying to test. Here we want to test that
-    main.run() correctly orchestrates extract → process → model → output → save,
-    so we let all of those run with real code.
-
-Pattern: mock at the *boundary* of the system (the extractor's data source, the
-database's external store), not inside the pipeline.
+Mocks at the system boundary (extractor + saved model) so tests are fast and
+offline while still exercising the real preprocessing → model → output → storage
+orchestration.
 """
 
 from __future__ import annotations
@@ -21,46 +11,61 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-import pandas as pd
+import numpy as np
+import pytest
 
-from src import main
+from src import main, settings
 
 
-def test_full_pipeline_writes_predictions_to_storage(
-    temp_fallback_path: Path,
+def test_train_saves_model_to_disk(regression_df, tmp_path, monkeypatch) -> None:
+    """train() should fit a model and persist it."""
+    saved: list[Path] = []
+
+    def fake_save(self, path=None):
+        dest = path or (tmp_path / "model.joblib")
+        import joblib
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        joblib.dump(self._pipeline, dest)
+        saved.append(dest)
+
+    monkeypatch.setattr(settings, "TARGET_COLUMN", "target")
+    monkeypatch.setattr(settings, "FEATURE_COLUMNS", [])
+
+    from src.model import Model
+    with (
+        patch("src.extractor.load_training_data", return_value=regression_df),
+        patch.object(Model, "save", fake_save),
+    ):
+        main.train()
+
+    assert len(saved) == 1 and saved[0].exists()
+
+
+def test_predict_stores_one_row_per_input(
+    regression_df, tmp_path, monkeypatch, temp_fallback_path: Path
 ) -> None:
-    """Run the full pipeline against a mocked extractor and verify the result
-    lands in storage with the right shape.
+    """predict() should store exactly one prediction per inference row."""
+    model_path = tmp_path / "model.joblib"
+    inference_df = regression_df.drop(columns=["target"]).head(5)
 
-    `temp_fallback_path` (from conftest.py) does two things:
-      - Points the local-JSON fallback at a temp file
-      - Clears Supabase env vars so the pipeline uses the local fallback
+    monkeypatch.setattr(settings, "TARGET_COLUMN", "target")
+    monkeypatch.setattr(settings, "FEATURE_COLUMNS", [])
 
-    `patch` replaces `src.extractor.extract_data` for the duration of the test,
-    returning predictable fake data instead of hitting Open-Meteo over HTTP.
-    """
-    fake_extracted = {
-        "TestItem": pd.DataFrame(
-            {
-                "date": pd.to_datetime(
-                    ["2026-01-01", "2026-01-02", "2026-01-03", "2026-01-04", "2026-01-05"]
-                ),
-                "value": [10.0, 10.5, 11.0, 10.8, 11.2],
-            }
-        ),
-    }
+    # First train a model so we have something to load.
+    with (
+        patch("src.extractor.load_training_data", return_value=regression_df),
+        patch("src.model.MODEL_PATH", model_path),
+        patch("src.model.MODEL_DIR", tmp_path),
+    ):
+        main.train()
 
-    with patch("src.extractor.extract_data", return_value=fake_extracted):
-        main.run()
+    with (
+        patch("src.extractor.load_inference_data", return_value=inference_df),
+        patch("src.model.MODEL_PATH", model_path),
+    ):
+        main.predict()
 
-    # The pipeline should have written exactly one row (one item) to the fallback file.
     rows = json.loads(temp_fallback_path.read_text())
-    assert len(rows) == 1
-
-    row = rows[0]
-    # Schema check: every field the dashboard expects should be present.
-    assert row["item"] == "TestItem"
-    assert isinstance(row["prediction"], float)
-    assert row["last_value"] == 11.2
-    assert isinstance(row["predicted_change_pct"], float)
-    assert "as_of_date" in row
+    assert len(rows) == 5
+    assert all("prediction" in r for r in rows)
+    assert all("predicted_at" in r for r in rows)

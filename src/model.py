@@ -1,71 +1,218 @@
 """The model.
 
-THIS IS THE ONE FILE YOU ARE DEFINITELY GOING TO REPLACE.
+Replace or extend this file with your own estimator. The interface the pipeline
+expects:
 
-The default `Model` here is a deliberately-trivial placeholder: it predicts
-tomorrow's value as today's value plus a small amount of random noise. It's
-useful for one purpose only — proving the rest of the pipeline plumbs through.
-Once you see the dashboard show predictions, you'll want to swap this out for
-something that actually learns from the data.
+    metrics = model.fit(X, y)   → dict of evaluation metrics
+    preds   = model.predict(X)  → np.ndarray of predictions
 
-A few starting points for your real model:
-  - Time-series forecasting → Facebook Prophet, statsmodels, sktime, NeuralProphet
-  - Regression → scikit-learn (linear, random forest, gradient boosting)
-  - Classification → scikit-learn, XGBoost, LightGBM
-  - Deep learning → PyTorch or TensorFlow
+The default is a scikit-learn Pipeline combining automatic preprocessing
+(StandardScaler for numeric columns, OneHotEncoder for categoricals) with a
+LinearRegression estimator. Swap the estimator in _build_estimator() to change
+the algorithm without touching anything else.
+
+Common swaps:
+  Regression     → Ridge, Lasso, RandomForestRegressor, XGBRegressor, LGBMRegressor
+  Classification → LogisticRegression, RandomForestClassifier, XGBClassifier, LGBMClassifier
+  Unsupervised   → KMeans, DBSCAN (skip fit(X, y) — call fit(X) directly on the estimator)
 """
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
+
+import joblib
 import numpy as np
 import pandas as pd
+from sklearn.compose import ColumnTransformer, make_column_selector
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import (
+    accuracy_score,
+    f1_score,
+    mean_absolute_error,
+    mean_squared_error,
+    r2_score,
+)
+from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+
+logger = logging.getLogger(__name__)
+
+MODEL_DIR = Path("data")
+MODEL_PATH = MODEL_DIR / "model.joblib"
 
 
 class Model:
-    """Placeholder random-walk model.
+    """sklearn Pipeline: auto-preprocessing + configurable estimator.
 
-    REPLACE ME. The interface this class exposes (`fit`, `predict_next`) is what
-    the rest of the pipeline expects — if you keep those two method signatures
-    the same, the pipeline will work with any model you swap in.
+    Works out of the box for numeric-only, categorical-only, or mixed-type
+    feature matrices without any manual column configuration.
     """
 
     def __init__(self) -> None:
-        # After `fit`, these hold the values needed to make a prediction.
-        # In a real model, these would be the trained parameters (weights, etc).
-        self._last_value: float | None = None
-        self._noise_scale: float = 0.0
+        self._pipeline = _build_pipeline()
+        self._fitted = False
 
-    def fit(self, series: pd.Series) -> None:
-        """Train the model on a single time-series.
+    # ------------------------------------------------------------------
+    # Pipeline interface
+    # ------------------------------------------------------------------
 
-        For this placeholder, "training" just means remembering the most recent
-        value and how volatile the series has been recently. A real model would
-        do gradient descent, tree splitting, or whatever its algorithm requires.
+    def fit(self, X: pd.DataFrame, y: pd.Series) -> dict[str, float]:
+        """Fit on (X, y) and return held-out validation metrics.
 
         Args:
-            series: a chronologically-ordered pd.Series of historical values.
-        """
-        if len(series) == 0:
-            raise ValueError("Cannot fit on an empty series.")
-
-        self._last_value = float(series.iloc[-1])
-
-        # Use the standard deviation of day-over-day changes as our noise scale.
-        # Anchoring noise to the data keeps the random walk in a believable range.
-        daily_changes = series.diff().dropna()
-        self._noise_scale = float(daily_changes.std()) if len(daily_changes) > 1 else 0.0
-
-    def predict_next(self) -> float:
-        """Predict the next value in the series.
+            X: feature DataFrame (any mix of numeric and string columns).
+            y: target Series (numeric for regression, string/int for classification).
 
         Returns:
-            The predicted next-step value, as a float.
+            dict of metric name → value evaluated on the held-out split.
         """
-        if self._last_value is None:
-            raise RuntimeError("Model not fitted. Call .fit(series) before .predict_next().")
+        from src import settings  # local import to keep Model decoupled from settings
 
-        # Random walk: last value plus a small random kick.
-        # `np.random.normal(0, sigma)` draws from a Gaussian centred on zero.
-        # We use half the daily-change stdev so predictions feel plausible.
-        noise = float(np.random.normal(0, self._noise_scale * 0.5))
-        return self._last_value + noise
+        X_train, X_val, y_train, y_val = train_test_split(
+            X, y,
+            test_size=settings.TEST_SIZE,
+            random_state=settings.RANDOM_STATE,
+        )
+
+        self._pipeline.fit(X_train, y_train)
+        self._fitted = True
+
+        y_pred = self._pipeline.predict(X_val)
+        metrics = _evaluate(y_val.to_numpy(), y_pred)
+        logger.info("Val metrics: %s", metrics)
+        return metrics
+
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        """Return predictions for every row in X.
+
+        Args:
+            X: feature DataFrame with the same columns seen during fit().
+
+        Returns:
+            1-D numpy array of predictions.
+        """
+        if not self._fitted:
+            raise RuntimeError("Call .fit() before .predict().")
+        return self._pipeline.predict(X)
+
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
+
+    def save(self, path: Path | None = None) -> None:
+        """Serialise the fitted pipeline to disk with joblib."""
+        dest = path or MODEL_PATH
+        MODEL_DIR.mkdir(parents=True, exist_ok=True)
+        joblib.dump(self._pipeline, dest)
+        logger.info("Saved model → %s", dest)
+
+    @classmethod
+    def load(cls, path: Path | None = None) -> "Model":
+        """Load a previously saved pipeline from disk."""
+        src_path = path or MODEL_PATH
+        m = cls()
+        m._pipeline = joblib.load(src_path)
+        m._fitted = True
+        return m
+
+
+# ------------------------------------------------------------------
+# MLflow helper — opt-in experiment tracking
+# ------------------------------------------------------------------
+
+def train_with_tracking(
+    X: pd.DataFrame, y: pd.Series
+) -> tuple[Model, dict[str, float]]:
+    """Train a Model and log params + metrics to MLflow.
+
+    Call this from main.py instead of constructing Model() directly when you
+    want experiment tracking. Writes runs to the URI in settings.MLFLOW_TRACKING_URI
+    (default: local mlruns/ directory).
+
+    Returns:
+        (fitted model, metrics dict)
+    """
+    import mlflow  # lazy import — keeps mlflow optional for basic usage
+
+    from src import settings
+
+    mlflow.set_tracking_uri(settings.MLFLOW_TRACKING_URI)
+    mlflow.set_experiment(settings.MLFLOW_EXPERIMENT_NAME)
+
+    with mlflow.start_run():
+        mlflow.log_params({
+            "estimator": type(_build_estimator()).__name__,
+            "test_size": settings.TEST_SIZE,
+            "n_features": X.shape[1],
+            "n_samples": len(X),
+        })
+        model = Model()
+        metrics = model.fit(X, y)
+        mlflow.log_metrics(metrics)
+
+    return model, metrics
+
+
+# ------------------------------------------------------------------
+# Private helpers
+# ------------------------------------------------------------------
+
+def _build_pipeline() -> Pipeline:
+    """Assemble the full preprocessing + estimator Pipeline."""
+    preprocessor = ColumnTransformer(
+        transformers=[
+            (
+                "num",
+                StandardScaler(),
+                make_column_selector(dtype_include=np.number),
+            ),
+            (
+                "cat",
+                OneHotEncoder(handle_unknown="ignore", sparse_output=False),
+                make_column_selector(dtype_include=object),
+            ),
+        ],
+        remainder="drop",
+    )
+    return Pipeline([
+        ("preprocessor", preprocessor),
+        ("estimator", _build_estimator()),
+    ])
+
+
+def _build_estimator():
+    """Return the sklearn estimator. Swap this line to change the algorithm."""
+    return LinearRegression()
+    # ── Regression alternatives ───────────────────────────────────────
+    # from sklearn.linear_model import Ridge, Lasso
+    # return Ridge(alpha=1.0)
+    # from sklearn.ensemble import RandomForestRegressor
+    # return RandomForestRegressor(n_estimators=100, random_state=42)
+    # from xgboost import XGBRegressor
+    # return XGBRegressor(n_estimators=100, learning_rate=0.1, random_state=42)
+    # from lightgbm import LGBMRegressor
+    # return LGBMRegressor(n_estimators=100, learning_rate=0.1, random_state=42)
+    # ── Classification alternatives ───────────────────────────────────
+    # from sklearn.linear_model import LogisticRegression
+    # return LogisticRegression(max_iter=1000)
+    # from sklearn.ensemble import RandomForestClassifier
+    # return RandomForestClassifier(n_estimators=100, random_state=42)
+    # from xgboost import XGBClassifier
+    # return XGBClassifier(n_estimators=100, learning_rate=0.1, random_state=42)
+
+
+def _evaluate(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
+    """Compute metrics appropriate for the target dtype."""
+    if np.issubdtype(y_true.dtype, np.number):
+        return {
+            "mae": float(mean_absolute_error(y_true, y_pred)),
+            "rmse": float(np.sqrt(mean_squared_error(y_true, y_pred))),
+            "r2": float(r2_score(y_true, y_pred)),
+        }
+    return {
+        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "f1_weighted": float(f1_score(y_true, y_pred, average="weighted")),
+    }

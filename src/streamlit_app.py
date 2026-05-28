@@ -1,31 +1,34 @@
 """Streamlit dashboard.
 
-Displays the latest predictions and lets the user explore historical data for
-each item. This is what gets deployed to your VPS so other people can see your
-work in a browser.
+Displays recent predictions stored by the pipeline. Deploy to Streamlit
+Community Cloud for a free public URL.
 
-Run locally with:    make dashboard
-Opens at:            http://localhost:8501
+Run locally:  make dashboard
+Opens at:     http://localhost:8501
 """
 
 from __future__ import annotations
 
-from datetime import date
+import os
 
 import pandas as pd
-import plotly.graph_objects as go
+import plotly.express as px
 import streamlit as st
 from dotenv import load_dotenv
 
-from src import database, extractor, settings
+from src import database, settings
 
 load_dotenv()
 
-# Streamlit page setup. Wide layout gives the charts more room to breathe.
-st.set_page_config(
-    page_title=settings.DASHBOARD_TITLE,
-    layout="wide",
-)
+# On Streamlit Community Cloud, credentials live in st.secrets. Copy them into
+# env vars so database.py can reach them via os.getenv, same as the pipeline.
+try:
+    for _key, _val in st.secrets.items():
+        os.environ.setdefault(_key, str(_val))
+except Exception:
+    pass
+
+st.set_page_config(page_title=settings.DASHBOARD_TITLE, layout="wide")
 
 
 def main() -> None:
@@ -39,91 +42,65 @@ def main() -> None:
 
     df = pd.DataFrame(rows)
 
-    # Latest "as of" date present in the data — what we'll show in the summary cards.
-    latest_as_of = df["as_of_date"].max()
-    latest = df[df["as_of_date"] == latest_as_of]
-
-    st.subheader(f"Latest predictions ({latest_as_of})")
-    _render_summary_cards(latest)
+    st.subheader("Recent predictions")
+    _render_summary_stats(df)
 
     st.divider()
 
-    st.subheader("Historical view")
-    item_names = [name for name, _ in settings.ITEMS_TO_PREDICT]
-    selected = st.selectbox("Pick an item", item_names)
-    _render_history_chart(selected, df)
+    col_left, col_right = st.columns(2)
+    with col_left:
+        _render_prediction_distribution(df)
+    with col_right:
+        _render_predictions_over_time(df)
+
+    st.divider()
+
+    st.subheader("Raw data")
+    st.dataframe(df, use_container_width=True)
 
 
-def _render_summary_cards(latest: pd.DataFrame) -> None:
-    """Show one card per item with prediction, last value, and predicted change."""
-    cols = st.columns(len(latest))
-    for col, (_, row) in zip(cols, latest.iterrows()):
-        with col:
-            delta_str = (
-                f"{row['predicted_change_pct']:+.2f}%"
-                if row.get("predicted_change_pct") is not None
-                else "—"
-            )
-            st.metric(
-                label=row["item"],
-                value=f"{row['prediction']:.2f}",
-                delta=delta_str,
-            )
-            st.caption(f"Last actual: {row['last_value']:.2f}")
-
-
-def _render_history_chart(item_name: str, predictions_df: pd.DataFrame) -> None:
-    """Plot actuals (from the data source) overlaid with the recent predictions."""
-    # Pull fresh history so the chart isn't limited to predictions stored in the DB.
-    # For a real-time dashboard you might cache this — Streamlit makes that easy
-    # with @st.cache_data, but we're keeping it simple for the template.
-    meta = dict(settings.ITEMS_TO_PREDICT).get(item_name)
-    if not meta:
-        st.error(f"No metadata found for {item_name!r} in settings.ITEMS_TO_PREDICT")
+def _render_summary_stats(df: pd.DataFrame) -> None:
+    """Show high-level stats about the prediction column."""
+    preds = pd.to_numeric(df["prediction"], errors="coerce").dropna()
+    if preds.empty:
+        st.info("prediction column contains no numeric values.")
         return
 
-    raw = extractor._fetch_open_meteo(  # type: ignore[attr-defined]
-        latitude=meta["latitude"],
-        longitude=meta["longitude"],
-        past_days=settings.LOOKBACK_DAYS,
-    )
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Rows", f"{len(df):,}")
+    c2.metric("Mean prediction", f"{preds.mean():.4g}")
+    c3.metric("Min", f"{preds.min():.4g}")
+    c4.metric("Max", f"{preds.max():.4g}")
 
-    fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=raw["date"],
-            y=raw["value"],
-            mode="lines+markers",
-            name="Actual",
-        )
-    )
 
-    item_predictions = predictions_df[predictions_df["item"] == item_name].copy()
-    if not item_predictions.empty:
-        item_predictions["as_of_date"] = pd.to_datetime(item_predictions["as_of_date"])
-        fig.add_trace(
-            go.Scatter(
-                x=item_predictions["as_of_date"],
-                y=item_predictions["prediction"],
-                mode="markers",
-                name="Prediction",
-                marker={"size": 10, "symbol": "diamond"},
-            )
-        )
+def _render_prediction_distribution(df: pd.DataFrame) -> None:
+    """Histogram of the prediction column."""
+    preds = pd.to_numeric(df["prediction"], errors="coerce").dropna()
+    if preds.empty:
+        return
+    fig = px.histogram(preds, nbins=30, title="Prediction distribution", labels={"value": "prediction"})
+    fig.update_layout(showlegend=False)
+    st.plotly_chart(fig, use_container_width=True)
 
-    fig.update_layout(
-        xaxis_title="Date",
-        yaxis_title="Value",
-        hovermode="x unified",
-    )
+
+def _render_predictions_over_time(df: pd.DataFrame) -> None:
+    """Line chart of predictions over time (requires a predicted_at column)."""
+    if "predicted_at" not in df.columns:
+        return
+    df = df.copy()
+    df["predicted_at"] = pd.to_datetime(df["predicted_at"], errors="coerce")
+    df["prediction"] = pd.to_numeric(df["prediction"], errors="coerce")
+    df = df.dropna(subset=["predicted_at", "prediction"]).sort_values("predicted_at")
+    if df.empty:
+        return
+    fig = px.line(df, x="predicted_at", y="prediction", title="Predictions over time")
     st.plotly_chart(fig, use_container_width=True)
 
 
 def _render_empty_state() -> None:
-    """Friendly message when there are no predictions yet."""
     st.info(
-        "No predictions stored yet. Run the pipeline once with:\n\n"
-        "```\nmake run\n```\n\n"
+        "No predictions stored yet. Train a model and run inference with:\n\n"
+        "```\nmake train\nmake predict\n```\n\n"
         "Then refresh this page."
     )
 
